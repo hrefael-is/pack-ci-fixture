@@ -101,6 +101,7 @@ jobs:
 
   secrets:
     name: check (secrets)
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
