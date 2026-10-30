@@ -1,0 +1,176 @@
+# pack-ci: CI template for Node/TypeScript projects (toolbox templates/ci/node-ts.yml, Phase 5, v1).
+#
+# POLICY (V2-4, V2-5): PACK_REQUIRED lists the mandatory checks. PACK_NOT_APPLICABLE
+# lists the checks that don't apply to this project, each with its reason.
+# A check in neither list runs if the project has it, and passes as
+# NOT_APPLICABLE only when it's listed there. ci-gate is the only required
+# status check: it fails unless every required check reports PASS.
+# Changing this file changes the CI policy: /release-check reports
+# CI_POLICY_CHANGED and a green ci-gate is not enough to merge (V2-6).
+name: pack-ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pack-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PACK_REQUIRED: "build typecheck test audit secrets"
+  PACK_NOT_APPLICABLE: "lint=no linter configured in this fixture; e2e=no end-to-end suite in this fixture"
+
+jobs:
+  check:
+    name: check (${{ matrix.check }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [build, typecheck, lint, test, e2e, audit]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ hashFiles('.nvmrc') != '' && '.nvmrc' || '' }}
+          node-version: ${{ hashFiles('.nvmrc') == '' && 'lts/*' || '' }}
+      - name: run and classify
+        env:
+          CHECK: ${{ matrix.check }}
+        run: |
+          set -uo pipefail
+          mkdir -p pack-result
+          required=false
+          for c in $PACK_REQUIRED; do [ "$c" = "$CHECK" ] && required=true; done
+          na_reason=""
+          IFS=';' read -ra na_items <<< "$PACK_NOT_APPLICABLE"
+          for item in "${na_items[@]}"; do
+            name="$(echo "${item%%=*}" | xargs)"
+            [ "$name" = "$CHECK" ] && na_reason="$(echo "${item#*=}" | xargs)"
+          done
+          has_script() {
+            node -e 'const s=(require("./package.json").scripts)||{};const v=s[process.argv[1]];process.exit(v&&!/no test specified/.test(v)?0:1)' "$1" 2>/dev/null
+          }
+          cmd=""
+          case "$CHECK" in
+            build) has_script build && cmd="npm run build" ;;
+            typecheck)
+              if has_script typecheck; then cmd="npm run typecheck"
+              elif [ -f tsconfig.json ]; then cmd="npx --no-install tsc --noEmit"; fi ;;
+            lint) has_script lint && cmd="npm run lint" ;;
+            test) has_script test && cmd="npm test" ;;
+            e2e) has_script test:e2e && cmd="npm run test:e2e" ;;
+            audit) [ -f package-lock.json ] && cmd="npm audit --omit=dev --audit-level=high" ;;
+          esac
+          if [ -z "$cmd" ]; then
+            if $required; then
+              status=MISSING_REQUIRED; echo "::error::MISSING_REQUIRED: $CHECK is required but the project has no command for it"
+            elif [ -n "$na_reason" ]; then
+              status=NOT_APPLICABLE; echo "::notice::NOT_APPLICABLE: $CHECK ($na_reason)"
+            else
+              status=MISSING_REQUIRED; echo "::error::MISSING_REQUIRED: $CHECK has no command and no NOT_APPLICABLE reason in PACK_NOT_APPLICABLE"
+            fi
+          elif [ ! -f package-lock.json ]; then
+            status=FAIL; echo "::error::FAIL: $CHECK: no package-lock.json, so a clean install isn't possible"
+          elif ! npm ci --no-audit --no-fund; then
+            status=FAIL; echo "::error::FAIL: $CHECK: npm ci failed"
+          elif bash -c "$cmd"; then
+            status=PASS
+          else
+            status=FAIL; echo "::error::FAIL: $CHECK ($cmd)"
+          fi
+          echo "$status" > "pack-result/$CHECK"
+          echo "| $CHECK | $status | ${cmd:-${na_reason:-none}} |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          [ "$status" = PASS ] || [ "$status" = NOT_APPLICABLE ]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pack-result-${{ matrix.check }}
+          path: pack-result/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  secrets:
+    name: check (secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: run gitleaks and classify
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -uo pipefail
+          mkdir -p pack-result /tmp/gl
+          status=FAIL
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          if curl -sSfL -o /tmp/gl/gl.tgz "$url" && echo "${GITLEAKS_SHA256}  /tmp/gl/gl.tgz" | sha256sum -c - && tar -xzf /tmp/gl/gl.tgz -C /tmp/gl gitleaks; then
+            if [ -z "${BASE_SHA:-}" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then range="$HEAD_SHA"; else range="${BASE_SHA}..${HEAD_SHA}"; fi
+            if /tmp/gl/gitleaks git --no-banner --redact --log-opts="$range" .; then status=PASS; else echo "::error::FAIL: secrets: gitleaks found a possible secret in $range"; fi
+          else
+            echo "::error::FAIL: secrets: gitleaks download or checksum failed"
+          fi
+          echo "$status" > pack-result/secrets
+          echo "| secrets | $status | gitleaks $GITLEAKS_VERSION |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          [ "$status" = PASS ]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pack-result-secrets
+          path: pack-result/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs: [check, secrets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: pack-result-*
+          path: pack-results
+          merge-multiple: true
+      - name: verify every required check passed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const needs = JSON.parse(process.env.NEEDS_JSON || '{}');
+          const required = (process.env.PACK_REQUIRED || '').split(/\s+/).filter(Boolean);
+          const problems = [];
+          const rows = [];
+          for (const [job, v] of Object.entries(needs)) {
+            if (!v || v.result !== 'success') problems.push(`job ${job} result is ${v && v.result}`);
+          }
+          if (!required.length) problems.push('PACK_REQUIRED is empty');
+          for (const name of required) {
+            let status = 'MISSING_REQUIRED';
+            try { status = fs.readFileSync(`pack-results/${name}`, 'utf8').trim(); } catch (_) { /* no marker: the check never reported */ }
+            rows.push(`| ${name} | ${status} |`);
+            if (status !== 'PASS') problems.push(`required check ${name}: ${status}`);
+          }
+          const summary = ['| required check | status |', '|---|---|', ...rows, '', problems.length ? `ci-gate FAIL: ${problems.join('; ')}` : 'ci-gate PASS'].join('\n');
+          if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary + '\n');
+          console.log(summary);
+          if (problems.length) { problems.forEach((p) => console.log(`::error::${p}`)); process.exit(1); }
+          NODE
