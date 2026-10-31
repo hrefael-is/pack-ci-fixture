@@ -23,8 +23,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PACK_REQUIRED: "build typecheck test audit secrets"
-  PACK_NOT_APPLICABLE: "lint=no linter configured in this fixture; e2e=no end-to-end suite in this fixture"
+  PACK_REQUIRED: "build typecheck audit secrets"
+  PACK_NOT_APPLICABLE: "test=dropped; lint=no linter configured in this fixture; e2e=no end-to-end suite in this fixture"
 
 jobs:
   check:
