@@ -1,10 +1,14 @@
-# pack-ci: CI template for Node/TypeScript projects (toolbox templates/ci/node-ts.yml, Phase 5, v1.1: runner pinned to ubuntu-24.04).
+# pack-ci: CI template for Node/TypeScript projects (toolbox templates/ci/node-ts.yml, Phase 5, v1.2: proof that tests ran).
 #
 # POLICY (V2-4, V2-5): PACK_REQUIRED lists the mandatory checks. PACK_NOT_APPLICABLE
 # lists the checks that don't apply to this project, each with its reason.
 # A check in neither list runs if the project has it, and passes as
 # NOT_APPLICABLE only when it's listed there. ci-gate is the only required
 # status check: it fails unless every required check reports PASS.
+# TEST PROOF (v1.2): a passing `npm test` is not enough. The test runner must write a JUnit
+# XML report to PACK_TEST_REPORT (deleted before the run, so it can only come from this run),
+# with more than 0 executed tests and no failures or errors. PACK_ALLOW_ZERO_TESTS: "true"
+# allows a report with 0 executed tests; set it only with a reason.
 # Changing this file changes the CI policy: /release-check reports
 # CI_POLICY_CHANGED and a green ci-gate is not enough to merge (V2-6).
 name: pack-ci
@@ -24,6 +28,8 @@ concurrency:
 
 env:
   PACK_REQUIRED: "build typecheck test audit secrets"
+  PACK_TEST_REPORT: "reports/junit.xml"
+  PACK_ALLOW_ZERO_TESTS: "false"
   PACK_NOT_APPLICABLE: "lint=no linter configured in this fixture; e2e=no end-to-end suite in this fixture"
 
 jobs:
@@ -83,10 +89,39 @@ jobs:
             status=FAIL; echo "::error::FAIL: $CHECK: no package-lock.json, so a clean install isn't possible"
           elif ! npm ci --no-audit --no-fund; then
             status=FAIL; echo "::error::FAIL: $CHECK: npm ci failed"
-          elif bash -c "$cmd"; then
-            status=PASS
           else
-            status=FAIL; echo "::error::FAIL: $CHECK ($cmd)"
+            report_ok=true
+            if [ "$CHECK" = test ]; then
+              case "${PACK_TEST_REPORT:-}" in
+                ""|/*|*..*) report_ok=false; echo "::error::FAIL: test: PACK_TEST_REPORT must be a relative path inside the repository (got '${PACK_TEST_REPORT:-}')" ;;
+                *) rm -f -- "$PACK_TEST_REPORT" ;;
+              esac
+            fi
+            if ! $report_ok; then
+              status=FAIL
+            elif bash -c "$cmd"; then
+              status=PASS
+              if [ "$CHECK" = test ]; then
+                # Proof that tests ran (v1.2): the report this run wrote, with executed tests and no failures.
+                if proof="$(node -e '
+                  const fs = require("fs"); const [file, allowZero] = process.argv.slice(1);
+                  let x; try { x = fs.readFileSync(file, "utf8"); } catch (_) { console.log(`no test report at ${file}: configure the test runner to write JUnit XML there`); process.exit(1); }
+                  if (!/<testsuites?\b/.test(x)) { console.log(`${file} is not a JUnit XML report`); process.exit(1); }
+                  const n = (re) => (x.match(re) || []).length;
+                  const cases = n(/<testcase\b/g); const skipped = n(/<skipped\b/g); const bad = n(/<failure\b/g) + n(/<error\b/g);
+                  const ran = cases - skipped;
+                  if (bad > 0) { console.log(`${file} reports ${bad} failure(s) or error(s) although the command exited 0`); process.exit(1); }
+                  if (ran <= 0 && allowZero !== "true") { console.log(`${file} shows 0 executed tests (${cases} test cases, ${skipped} skipped)`); process.exit(1); }
+                  console.log(`${ran} test(s) executed, ${skipped} skipped (${file})`);
+                ' "$PACK_TEST_REPORT" "${PACK_ALLOW_ZERO_TESTS:-false}")"; then
+                  echo "::notice::test proof: $proof"
+                else
+                  status=FAIL; echo "::error::FAIL: test: $proof"
+                fi
+              fi
+            else
+              status=FAIL; echo "::error::FAIL: $CHECK ($cmd)"
+            fi
           fi
           echo "$status" > "pack-result/$CHECK"
           echo "| $CHECK | $status | ${cmd:-${na_reason:-none}} |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
