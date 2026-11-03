@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "npm run verify",
-    "verify": "node scripts/run-tests.cjs"
+    "verify": "node scripts/run-tests.cjs --reporter=dot --reporter=junit --outputFile.junit=reports/junit.xml"
   },
   "devDependencies": {
     "typescript": "5.8.3",
