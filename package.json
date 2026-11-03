@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "npm run verify",
+    "verify": "node scripts/run-tests.cjs"
   },
   "devDependencies": {
     "typescript": "5.8.3",
