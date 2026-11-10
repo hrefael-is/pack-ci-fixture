@@ -1,9 +1,16 @@
 {
   "schema_version": "pack-config-1",
   "reviewers_not_required": [
-    { "agent": "typescript-reviewer", "reason": "not built yet; code-reviewer covers TypeScript in this fixture" }
+    {
+      "agent": "typescript-reviewer",
+      "reason": "not built yet; code-reviewer covers TypeScript in this fixture"
+    }
   ],
   "checks_not_applicable": [
-    { "check": "smoke", "reason": "the fixture has no deployed environment" }
-  ]
+    {
+      "check": "smoke",
+      "reason": "the fixture has no deployed environment"
+    }
+  ],
+  "project_root": "demo-app"
 }

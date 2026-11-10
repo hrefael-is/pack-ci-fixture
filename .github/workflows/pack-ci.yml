@@ -1,4 +1,4 @@
-# pack-ci: CI template for Node/TypeScript projects (toolbox templates/ci/node-ts.yml, Phase 5, v1.2: proof that tests ran).
+# pack-ci: CI template for Node/TypeScript projects (toolbox templates/ci/node-ts.yml, Phase 5, v1.3: project in a subfolder).
 #
 # POLICY (V2-4, V2-5): PACK_REQUIRED lists the mandatory checks. PACK_NOT_APPLICABLE
 # lists the checks that don't apply to this project, each with its reason.
@@ -9,6 +9,12 @@
 # XML report to PACK_TEST_REPORT (deleted before the run, so it can only come from this run),
 # with more than 0 executed tests and no failures or errors. PACK_ALLOW_ZERO_TESTS: "true"
 # allows a report with 0 executed tests; set it only with a reason.
+# PROJECT FOLDER (v1.3): PACK_PROJECT_DIR is the folder that holds package.json and package-lock.json
+# ("." = repository root, the default). It must match project_root in .claude/pack-config.json;
+# /release-check blocks the PR (CI_PROJECT_DIR_MISMATCH) when they differ. Define it ONCE, here at
+# workflow level, never in a job or a step (CI_PROJECT_DIR_OVERRIDE). Every check runs in that folder;
+# an invalid or missing folder FAILS (no fallback to the root). pack-result/ stays at the repo root.
+# PACK_TEST_REPORT is relative to the project folder.
 # Changing this file changes the CI policy: /release-check reports
 # CI_POLICY_CHANGED and a green ci-gate is not enough to merge (V2-6).
 name: pack-ci
@@ -27,6 +33,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  PACK_PROJECT_DIR: "demo-app"
   PACK_REQUIRED: "build typecheck test audit secrets"
   PACK_TEST_REPORT: "reports/junit.xml"
   PACK_ALLOW_ZERO_TESTS: "false"
@@ -54,12 +61,29 @@ jobs:
           CHECK: ${{ matrix.check }}
         run: |
           set -uo pipefail
-          mkdir -p pack-result
+          root_dir="$PWD"
+          mkdir -p "$root_dir/pack-result"
+          # v1.3: validate PACK_PROJECT_DIR once, then run everything below inside it. Invalid -> FAIL, never the root.
+          dir_ok=true; dir_why=""
+          dir_valid() {
+            case "$1" in ""|/*|*\\*|*/) return 1 ;; esac
+            [ "$1" = . ] && return 0
+            local seg p="" segs
+            IFS=/ read -ra segs <<< "$1"
+            for seg in "${segs[@]}"; do
+              case "$seg" in ""|.|..) return 1 ;; esac
+              p="${p:+$p/}$seg"
+              [ -L "$p" ] && return 1
+            done
+            [ -d "$1" ] && [ -f "$1/package.json" ]
+          }
+          if ! dir_valid "${PACK_PROJECT_DIR-}"; then dir_ok=false; dir_why="PACK_PROJECT_DIR '${PACK_PROJECT_DIR-}' must be a relative folder inside the repository (no '..', no symlink) that contains package.json"
+          elif ! cd -- "$PACK_PROJECT_DIR"; then dir_ok=false; dir_why="cannot enter PACK_PROJECT_DIR '$PACK_PROJECT_DIR'"; fi
           required=false
           for c in $PACK_REQUIRED; do [ "$c" = "$CHECK" ] && required=true; done
           na_reason=""
           IFS=';' read -ra na_items <<< "$PACK_NOT_APPLICABLE"
-          for item in "${na_items[@]}"; do
+          for item in ${na_items[@]+"${na_items[@]}"}; do
             name="$(echo "${item%%=*}" | xargs)"
             [ "$name" = "$CHECK" ] && na_reason="$(echo "${item#*=}" | xargs)"
           done
@@ -67,7 +91,7 @@ jobs:
             node -e 'const s=(require("./package.json").scripts)||{};const v=s[process.argv[1]];process.exit(v&&!/no test specified/.test(v)?0:1)' "$1" 2>/dev/null
           }
           cmd=""
-          case "$CHECK" in
+          $dir_ok && case "$CHECK" in
             build) has_script build && cmd="npm run build" ;;
             typecheck)
               if has_script typecheck; then cmd="npm run typecheck"
@@ -77,7 +101,9 @@ jobs:
             e2e) has_script test:e2e && cmd="npm run test:e2e" ;;
             audit) [ -f package-lock.json ] && cmd="npm audit --omit=dev --audit-level=high" ;;
           esac
-          if [ -z "$cmd" ]; then
+          if ! $dir_ok; then
+            status=FAIL; echo "::error::FAIL: $CHECK: $dir_why"
+          elif [ -z "$cmd" ]; then
             if $required; then
               status=MISSING_REQUIRED; echo "::error::MISSING_REQUIRED: $CHECK is required but the project has no command for it"
             elif [ -n "$na_reason" ]; then
@@ -123,8 +149,8 @@ jobs:
               status=FAIL; echo "::error::FAIL: $CHECK ($cmd)"
             fi
           fi
-          echo "$status" > "pack-result/$CHECK"
-          echo "| $CHECK | $status | ${cmd:-${na_reason:-none}} |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "$status" > "$root_dir/pack-result/$CHECK"
+          echo "| $CHECK | $status | ${cmd:-${na_reason:-none}} (project folder: ${PACK_PROJECT_DIR-?}) |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           [ "$status" = PASS ] || [ "$status" = NOT_APPLICABLE ]
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
