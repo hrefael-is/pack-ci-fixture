@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PACK_PROJECT_DIR: "demo-app"
+  PACK_PROJECT_DIR: "."
   PACK_REQUIRED: "build typecheck test audit secrets"
   PACK_TEST_REPORT: "reports/junit.xml"
   PACK_ALLOW_ZERO_TESTS: "false"
